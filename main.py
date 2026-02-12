@@ -76,38 +76,47 @@ def health():
     return {"status": "Online", "v": "3.0.0"}
 
 # --- LOGIN CON AUTO-REGISTRO DE HWID ---
+# --- REEMPLAZA ESTO EN TU main.py DE RENDER ---
 @app.post("/login")
 def login(form_data: OAuth2PasswordRequestForm = Depends(), x_hwid: Optional[str] = Header(None)):
-    """Autentica y vincula el HWID si el usuario es nuevo."""
+    print(f"[AUTH] Intento de login para usuario: {form_data.username}") # Log para Render
     db = get_db()
     try:
         cursor = db.cursor(cursor_factory=RealDictCursor)
-        # Buscar usuario
+        # Convertimos el hash a minúsculas para asegurar coincidencia exacta
+        hashed_input = hash_pwd(form_data.password).lower()
+        
         cursor.execute("SELECT * FROM bypass_users WHERE username = %s AND password = %s", 
-                       (form_data.username, hash_pwd(form_data.password)))
+                       (form_data.username.strip(), hashed_input))
         user = cursor.fetchone()
         
         if not user:
+            print(f"[AUTH] Fallo: Usuario o clave no coinciden en DB")
             raise HTTPException(401, "Usuario o clave incorrectos")
 
-        # Lógica de HWID
-        if user['hwid'] == 'NONE' and x_hwid:
-            cursor.execute("UPDATE bypass_users SET hwid = %s WHERE id = %s", (x_hwid, user['id']))
+        # Lógica de HWID mejorada
+        client_hwid = x_hwid if x_hwid else "NONE"
+        
+        if user['hwid'] == 'NONE' and client_hwid != 'NONE':
+            cursor.execute("UPDATE bypass_users SET hwid = %s WHERE id = %s", (client_hwid, user['id']))
             db.commit()
-            user['hwid'] = x_hwid
-        elif user['hwid'] != 'NONE' and user['hwid'] != x_hwid:
+            print(f"[AUTH] HWID vinculado con éxito para {user['username']}")
+        elif user['hwid'] != 'NONE' and user['hwid'] != client_hwid:
+            print(f"[AUTH] Bloqueo: HWID Mismatch para {user['username']}")
             raise HTTPException(403, "Hardware ID Mismatch: Acceso denegado")
 
-        # Generar Token (Simplificado para tu lógica actual)
         return {
             "access_token": "session_active", 
             "token_type": "bearer", 
             "role": user['role'],
             "membresia": user['membresia']
         }
+    except Exception as e:
+        print(f"[DB ERROR] {str(e)}")
+        raise HTTPException(500, "Error interno del servidor")
     finally:
         db.close()
-
+        
 # --- GENERAR LLAVES ---
 @app.post("/keys/generate")
 def generate_keys(payload: KeyGen):
