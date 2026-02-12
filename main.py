@@ -59,10 +59,15 @@ class UserResponse(BaseModel):
 # =============================================================================
 
 def get_db():
-    """Retorna conexión a Supabase."""
     if not DATABASE_URL:
-        raise Exception("DATABASE_URL no configurada en Render")
-    return psycopg2.connect(DATABASE_URL)
+        print("[!] ERROR: DATABASE_URL no está definida en Render")
+        raise HTTPException(status_code=500, detail="Error de configuración del servidor")
+    try:
+        # Añadimos un timeout para que no se quede colgado
+        return psycopg2.connect(DATABASE_URL, connect_timeout=5)
+    except Exception as e:
+        print(f"[!] ERROR DE CONEXIÓN A SUPABASE: {e}")
+        raise HTTPException(status_code=503, detail="La base de datos no está disponible")
 
 def hash_pwd(p: str):
     return hashlib.sha256(p.encode()).hexdigest()
