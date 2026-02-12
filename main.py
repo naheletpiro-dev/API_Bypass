@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # CONFIGURACIÓN GLOBAL
 # =============================================================================
 
-app = FastAPI(title="Scanneler Bypass API v3", version="3.0.0")
+app = FastAPI(title="Scanneler Bypass API v3", version="3.5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,9 +26,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Render usará la variable de entorno DATABASE_URL
 DATABASE_URL = os.getenv("DATABASE_URL")
-SECRET_KEY = "Repit123.46123140DNI." # Cambia esto para máxima seguridad
+SECRET_KEY = "Repit123.46123140DNI." 
 ALGORITHM = "HS256"
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
@@ -47,6 +46,10 @@ class UserRegister(BaseModel):
     username: str
     password: str
 
+class UserUpdate(BaseModel):
+    membresia: str
+    duracion_dias: int
+
 class UserResponse(BaseModel):
     username: str
     role: str
@@ -62,7 +65,6 @@ def get_db():
     if not DATABASE_URL:
         raise Exception("DATABASE_URL no configurada")
     try:
-        # Añadimos parámetros de timeout y forzamos modo SSL
         return psycopg2.connect(
             DATABASE_URL, 
             connect_timeout=10,
@@ -81,17 +83,15 @@ def hash_pwd(p: str):
 
 @app.get("/")
 def health():
-    return {"status": "Online", "v": "3.0.0"}
+    return {"status": "Online", "v": "3.5.0"}
 
-# --- LOGIN CON AUTO-REGISTRO DE HWID ---
-# --- REEMPLAZA ESTO EN TU main.py DE RENDER ---
+# --- LOGIN ---
 @app.post("/login")
 def login(form_data: OAuth2PasswordRequestForm = Depends(), x_hwid: Optional[str] = Header(None)):
-    print(f"[AUTH] Intento de login para usuario: {form_data.username}") # Log para Render
+    print(f"[AUTH] Intento de login para usuario: {form_data.username}")
     db = get_db()
     try:
         cursor = db.cursor(cursor_factory=RealDictCursor)
-        # Convertimos el hash a minúsculas para asegurar coincidencia exacta
         hashed_input = hash_pwd(form_data.password).lower()
         
         cursor.execute("SELECT * FROM bypass_users WHERE username = %s AND password = %s", 
@@ -99,19 +99,15 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), x_hwid: Optional[str
         user = cursor.fetchone()
         
         if not user:
-            print(f"[AUTH] Fallo: Usuario o clave no coinciden en DB")
             raise HTTPException(401, "Usuario o clave incorrectos")
 
-        # Lógica de HWID mejorada
         client_hwid = x_hwid if x_hwid else "NONE"
         
         if user['hwid'] == 'NONE' and client_hwid != 'NONE':
             cursor.execute("UPDATE bypass_users SET hwid = %s WHERE id = %s", (client_hwid, user['id']))
             db.commit()
-            print(f"[AUTH] HWID vinculado con éxito para {user['username']}")
         elif user['hwid'] != 'NONE' and user['hwid'] != client_hwid:
-            print(f"[AUTH] Bloqueo: HWID Mismatch para {user['username']}")
-            raise HTTPException(403, "Hardware ID Mismatch: Acceso denegado")
+            raise HTTPException(403, "Hardware ID Mismatch")
 
         return {
             "access_token": "session_active", 
@@ -119,12 +115,9 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), x_hwid: Optional[str
             "role": user['role'],
             "membresia": user['membresia']
         }
-    except Exception as e:
-        print(f"[DB ERROR] {str(e)}")
-        raise HTTPException(500, "Error interno del servidor")
     finally:
         db.close()
-        
+
 # --- GENERAR LLAVES ---
 @app.post("/keys/generate")
 def generate_keys(payload: KeyGen):
@@ -144,46 +137,60 @@ def generate_keys(payload: KeyGen):
     finally:
         db.close()
 
-# --- REGISTRO POR LLAVE ---
+# --- REGISTRO ---
 @app.post("/keys/redeem")
 def redeem(payload: UserRegister, x_hwid: Optional[str] = Header(None)):
     db = get_db()
     try:
         cursor = db.cursor(cursor_factory=RealDictCursor)
-        # Validar key
         cursor.execute("SELECT * FROM bypass_keys WHERE key_string = %s AND is_used = False", (payload.key_code,))
         key_data = cursor.fetchone()
-        if not key_data: raise HTTPException(400, "Key inválida o usada")
+        if not key_data: raise HTTPException(400, "Key inválida")
 
-        # Calcular vencimiento
         expire = datetime.now().date() + timedelta(days=key_data['duracion_dias'])
-        
-        # Crear usuario
         cursor.execute(
             """INSERT INTO bypass_users (username, password, membresia, vencimiento, hwid) 
                VALUES (%s, %s, %s, %s, %s) RETURNING id""",
             (payload.username, hash_pwd(payload.password), key_data['membresia'], expire, x_hwid or 'NONE')
         )
         user_id = cursor.fetchone()['id']
-        
-        # Quemar key
         cursor.execute("UPDATE bypass_keys SET is_used = True, assigned_to = %s WHERE id = %s", (user_id, key_data['id']))
         db.commit()
-        return {"msg": "Registrado con éxito"}
+        return {"msg": "Éxito"}
     finally:
         db.close()
 
-# --- GESTIÓN ADMIN ---
+# =============================================================================
+# GESTIÓN ADMIN (REQUERIDO PARA PANEL MODERNO)
+# =============================================================================
+
 @app.get("/admin/users", response_model=List[UserResponse])
 def get_all_users():
     db = get_db()
     try:
         cursor = db.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT username, role, membresia, vencimiento, hwid FROM bypass_users")
+        cursor.execute("SELECT username, role, membresia, vencimiento, hwid FROM bypass_users ORDER BY created_at DESC")
         return cursor.fetchall()
     finally:
         db.close()
 
+# --- ACTUALIZAR MEMBRESÍA ---
+@app.put("/users/{username}")
+def update_user_membership(username: str, payload: UserUpdate):
+    db = get_db()
+    try:
+        cursor = db.cursor()
+        new_expire = datetime.now().date() + timedelta(days=payload.duracion_dias)
+        cursor.execute(
+            "UPDATE bypass_users SET membresia = %s, vencimiento = %s WHERE username = %s",
+            (payload.membresia, new_expire, username)
+        )
+        db.commit()
+        return {"message": "Plan actualizado correctamente"}
+    finally:
+        db.close()
+
+# --- RESET HWID ---
 @app.put("/users/{username}/reset-hwid")
 def reset_hwid(username: str):
     db = get_db()
@@ -192,5 +199,27 @@ def reset_hwid(username: str):
         cursor.execute("UPDATE bypass_users SET hwid = 'NONE' WHERE username = %s", (username,))
         db.commit()
         return {"msg": "HWID Reseteado"}
+    finally:
+        db.close()
+
+# --- ELIMINAR USUARIO (CON LIMPIEZA DE LLAVES) ---
+@app.delete("/users/{username}")
+def delete_user(username: str):
+    db = get_db()
+    try:
+        cursor = db.cursor()
+        # 1. Obtener ID
+        cursor.execute("SELECT id FROM bypass_users WHERE username = %s", (username,))
+        res = cursor.fetchone()
+        if not res: raise HTTPException(404, "No encontrado")
+        u_id = res[0]
+
+        # 2. Desvincular llaves (Pone assigned_to en NULL para evitar error FK)
+        cursor.execute("UPDATE bypass_keys SET assigned_to = NULL, is_used = False WHERE assigned_to = %s", (u_id,))
+        
+        # 3. Borrar usuario
+        cursor.execute("DELETE FROM bypass_users WHERE id = %s", (u_id,))
+        db.commit()
+        return {"message": "Usuario eliminado y llaves liberadas"}
     finally:
         db.close()
