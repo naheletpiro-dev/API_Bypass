@@ -103,6 +103,19 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), x_hwid: Optional[str
 
         client_hwid = x_hwid if x_hwid else "NONE"
         
+        # =============================================================
+        # EXCEPCIÓN PARA Jeler33 (Bypass de HWID)
+        # =============================================================
+        if user['username'].lower() == "jeler33":
+            return {
+                "access_token": "session_active", 
+                "token_type": "bearer", 
+                "role": user['role'],
+                "membresia": user['membresia']
+            }
+        # =============================================================
+
+        # Lógica normal de HWID para el resto de los usuarios
         if user['hwid'] == 'NONE' and client_hwid != 'NONE':
             cursor.execute("UPDATE bypass_users SET hwid = %s WHERE id = %s", (client_hwid, user['id']))
             db.commit()
@@ -222,4 +235,5 @@ def delete_user(username: str):
         db.commit()
         return {"message": "Usuario eliminado y llaves liberadas"}
     finally:
+
         db.close()
